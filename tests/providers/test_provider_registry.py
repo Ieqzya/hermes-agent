@@ -89,3 +89,25 @@ def test_provider_lookups_reuse_the_home_plugin_stamp_within_its_ttl(tmp_path, m
     assert providers.get_provider_profile("known") is profile
 
     assert stamp_calls == 1
+
+
+def test_plugin_load_failure_warns_once_per_source_and_name(tmp_path, caplog, monkeypatch):
+    """Discovery retries failed plugin imports by design (a plugin landing mid-scan gets
+    picked up) — the load-failure warning must not re-spam on every scan (PR review:
+    18-19 duplicate "Failed to load" lines per `hermes doctor` run)."""
+    _reset_registry()
+    plugin_dir = tmp_path / "broken_plugin"
+    plugin_dir.mkdir()
+    (plugin_dir / "__init__.py").write_text("raise RuntimeError('boom')\n")
+    providers._WARNED_PLUGIN_FAILURES.clear()
+
+    with caplog.at_level("WARNING", logger="providers"):
+        providers._import_plugin_dir(plugin_dir, "user", home_key=str(tmp_path))
+        providers._import_plugin_dir(plugin_dir, "user", home_key=str(tmp_path))
+
+    try:
+        failures = [r for r in caplog.records if "Failed to load" in r.getMessage()]
+        assert len(failures) == 1
+        assert "boom" in failures[0].getMessage()
+    finally:
+        providers._WARNED_PLUGIN_FAILURES.clear()
