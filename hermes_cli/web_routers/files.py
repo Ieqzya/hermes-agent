@@ -96,6 +96,30 @@ _SENSITIVE_MANAGED_FILE_BASENAMES = frozenset({
 # trees are blocked wherever they sit under the root, no HERMES_HOME resolution.
 _SENSITIVE_MANAGED_DIR_NAMES = frozenset({"mcp-tokens", "pairing"})
 
+# Kernel pseudo-filesystems. Nothing under them is an operator document: every
+# path is a live view of process or kernel state. ``/proc/self/environ`` hands
+# back the dashboard's entire environment — precisely the material the
+# credential denylists above exist to keep off this surface, and a trivial
+# bypass of them — while ``/proc/kcore`` / ``/dev/zero`` turn one GET into an
+# enormous or never-ending read. Denied on every managed-files read path.
+_PSEUDO_FS_ROOTS = frozenset({"/proc", "/sys", "/dev"})
+
+
+def _is_pseudo_fs_path(path: Path) -> bool:
+    """True when ``path`` (or the target it resolves to) sits in a kernel
+    pseudo-filesystem. Both forms are checked so a symlink inside the browsable
+    tree cannot point the reader at ``/proc``."""
+    candidates = [path]
+    try:
+        candidates.append(path.resolve())
+    except (OSError, RuntimeError):
+        pass
+    for candidate in candidates:
+        text = str(candidate)
+        if any(text == root or text.startswith(root + "/") for root in _PSEUDO_FS_ROOTS):
+            return True
+    return False
+
 
 def _is_sensitive_filename(name: str) -> bool:
     """Basename denylist: ``.env`` / ``.env.<suffix>`` / ``.envrc`` plus the
@@ -109,14 +133,17 @@ def _is_sensitive_filename(name: str) -> bool:
 
 
 def _is_sensitive_path(path: Path) -> bool:
-    """True when the basename is sensitive OR any path component (case-
-    insensitive) is a credential directory. Read-side guard (list/read/
-    download); the write endpoints are a separate threat class.
+    """True when the basename is sensitive, any path component (case-
+    insensitive) is a credential directory, or the path lives in a kernel
+    pseudo-filesystem. Read-side guard (list/read/download); the write
+    endpoints are a separate threat class.
 
     Read-side only: this guards list/read/download (the #57505 exfil surface). The write endpoints
     (upload/mkdir/delete) are a separate threat class handled by the write-path checks; extending this guard
     to them is out of scope for this fix.
     """
+    if _is_pseudo_fs_path(path):
+        return True
     if _is_sensitive_filename(path.name):
         return True
     return any(part.lower() in _SENSITIVE_MANAGED_DIR_NAMES for part in path.parts)
